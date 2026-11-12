@@ -6,7 +6,11 @@ struct Chip: Identifiable, Equatable {
     let number: Int
     let name: String
     let isCurrent: Bool
-    var center: CGPoint = .zero   // only used when pinned
+    let color: Int?
+    // Only used when pinned over a space's own label:
+    var center: CGPoint = .zero
+    var minWidth: CGFloat?
+    var maxWidth: CGFloat?
 }
 
 final class OverlayModel: ObservableObject {
@@ -19,15 +23,16 @@ private struct ChipView: View {
     let chip: Chip
     var body: some View {
         HStack(spacing: 5) {
-            Text("\(chip.number)").opacity(0.6)
+            if chip.maxWidth == nil { Text("\(chip.number)").opacity(0.6) }
             Text(chip.name).lineLimit(1)
         }
-        .font(.system(size: 12, weight: .semibold, design: .rounded))
+        .font(.system(size: 13, weight: .semibold, design: .rounded))
         .foregroundStyle(.white)
         .padding(.horizontal, 9)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(chip.isCurrent ? Color.accentColor : Color.black.opacity(0.62)))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+        .padding(.vertical, 4)
+        .frame(minWidth: chip.minWidth, maxWidth: chip.maxWidth)
+        .background(Capsule().fill(chip.color.map { Color(nsColor: Palette.colors[$0]) } ?? Color.black.opacity(0.62)))
+        .overlay(Capsule().strokeBorder(.white.opacity(chip.isCurrent ? 0.95 : 0.18), lineWidth: chip.isCurrent ? 2 : 0.5))
         .fixedSize()
     }
 }
@@ -118,12 +123,17 @@ final class MissionControlOverlay {
             let onScreen = frames.first { list in
                 list.count == spaces.count && list.first.map { screen.topLeftFrame.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true
             }
-            var chips = spaces.map { Chip(id: $0.id, number: $0.index, name: $0.name, isCurrent: $0.isCurrent) }
+            var chips = spaces.map { Chip(id: $0.id, number: $0.index, name: $0.name, isCurrent: $0.isCurrent, color: $0.color) }
             if let onScreen {
-                // Exact: one chip right below each space in the Spaces bar. Unnamed
-                // spaces already read "Desktop N" there, so only named ones get a chip.
+                // Exact: named spaces get a chip on their own entry in the Spaces bar. While the
+                // bar is a row of text labels the chip covers the label, so it reads as renamed;
+                // once it grows into thumbnails the chip sits on the thumbnail's bottom edge.
                 for i in chips.indices {
-                    chips[i].center = CGPoint(x: onScreen[i].midX - origin.x, y: onScreen[i].maxY - origin.y + 13)
+                    let frame = onScreen[i].offsetBy(dx: -origin.x, dy: -origin.y)
+                    let isLabel = frame.height < 44
+                    chips[i].center = CGPoint(x: frame.midX, y: isLabel ? frame.midY : frame.maxY)
+                    chips[i].minWidth = isLabel ? frame.width + 8 : nil
+                    chips[i].maxWidth = isLabel ? frame.width + 30 : max(frame.width, 60)
                 }
                 chips = chips.enumerated().filter { spaces[$0.offset].customName != nil }.map(\.element)
                 entry.model.pinned = true
@@ -164,6 +174,43 @@ final class MissionControlOverlay {
         window.contentView = NSHostingView(rootView: OverlayView(model: model))
         windows[displayID] = (window, model)
         return (window, model)
+    }
+
+    /// `SpaceTags --debug <dir>`: writes what the overlay believes it is showing, plus a picture of it.
+    func debugDump(to directory: URL) {
+        var lines = ["missionControl=\(active) axTrusted=\(AXIsProcessTrusted()) barExpanded=\(barExpanded)"]
+        for space in store.spaces {
+            lines.append("space \(space.index) id=\(space.id) key=\(space.key) name=\(space.name) custom=\(space.customName ?? "-") "
+                + "color=\(space.color.map(String.init) ?? "-") current=\(space.isCurrent) fullscreen=\(space.isFullscreen) apps=\(space.appPIDs.count)")
+        }
+        if AXIsProcessTrusted() {
+            lines.append("axFrames=\(spaceButtonFrames())")
+            if let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first {
+                let app = AXUIElementCreateApplication(dock.processIdentifier)
+                for child in children(of: app) where string(kAXIdentifierAttribute, of: child)?.hasPrefix("mc") == true {
+                    dumpTree(child, depth: 0, into: &lines)
+                }
+            }
+        }
+        for (id, entry) in windows {
+            let window = entry.window
+            lines.append("window \(id) frame=\(window.frame) visible=\(window.isVisible) alpha=\(window.alphaValue) "
+                + "occlusionVisible=\(window.occlusionState.contains(.visible)) pinned=\(entry.model.pinned) stripY=\(entry.model.stripY)")
+            for chip in entry.model.chips { lines.append("  chip \(chip.number) \(chip.name) center=\(chip.center)") }
+            if let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("overlay-\(id).png"))
+            }
+        }
+        try? lines.joined(separator: "\n").write(to: directory.appendingPathComponent("debug.txt"), atomically: true, encoding: .utf8)
+    }
+
+    private func dumpTree(_ element: AXUIElement, depth: Int, into lines: inout [String]) {
+        guard depth < 8 else { return }
+        let fields = [kAXRoleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute]
+            .map { string($0, of: element) ?? "-" }.joined(separator: " | ")
+        lines.append(String(repeating: "  ", count: depth) + "ax " + fields + " " + (frame(of: element).map { "\($0)" } ?? "-"))
+        for child in children(of: element) { dumpTree(child, depth: depth + 1, into: &lines) }
     }
 
     // MARK: Accessibility — where the Dock drew each space in the Spaces bar

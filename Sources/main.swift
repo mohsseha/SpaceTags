@@ -45,8 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         store.$spaces.combineLatest(store.$activeID)
             .sink { [weak self] spaces, activeID in
-                let name = spaces.first { $0.id == activeID }?.name ?? "Spaces"
-                self?.statusItem.button?.title = name.count > 20 ? name.prefix(19) + "…" : name
+                let space = spaces.first { $0.id == activeID }
+                let name = space?.name ?? "Spaces"
+                // Small screens (and notched ones) have little menu bar room, so the pill gets shorter there.
+                let limit = (NSScreen.main?.frame.width ?? 0) < 1600 ? 12 : 20
+                self?.statusItem.button?.image = Palette.pill(name.count > limit ? name.prefix(limit - 1) + "…" : name, color: space?.color)
+                self?.statusItem.button?.imagePosition = .imageOnly
             }
             .store(in: &subscriptions)
 
@@ -71,6 +75,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         overlay.start()
 
+        if !UserDefaults.standard.bool(forKey: "autoNamedOnce") {
+            UserDefaults.standard.set(true, forKey: "autoNamedOnce")
+            autoName()
+        }
+
+        // Come back after a reboot, once the app lives somewhere permanent.
+        if Bundle.main.bundlePath.contains("/Applications/"), !UserDefaults.standard.bool(forKey: "registeredLoginItem") {
+            UserDefaults.standard.set(true, forKey: "registeredLoginItem")
+            try? SMAppService.mainApp.register()
+        }
+
         // Accessibility is optional: it lets Mission Control labels sit exactly under each space.
         if !UserDefaults.standard.bool(forKey: "askedForAccessibility") {
             UserDefaults.standard.set(true, forKey: "askedForAccessibility")
@@ -85,11 +100,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switcher.go(to: store.spaces[index - 1])
     }
 
+    /// Names every unnamed desktop after what is open on it. Full-screen spaces already show their app.
+    @objc private func autoName() {
+        store.refresh()
+        let titles = store.windowTitles
+        let targets = store.spaces.filter { !$0.isFullscreen && $0.customName == nil && !$0.appPIDs.isEmpty }
+        Task { @MainActor in
+            for space in targets {
+                let apps = space.appPIDs.prefix(6).compactMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
+                guard let name = await AutoNamer.suggest(apps: apps, titles: titles[space.id] ?? []),
+                      let current = store.spaces.first(where: { $0.key == space.key }), current.customName == nil
+                else { continue }
+                // Two desktops with similar apps would otherwise get the same name.
+                let taken = Set(store.spaces.compactMap(\.customName))
+                let unique = [name] + (2...9).map { "\(name) \($0)" }
+                store.setName(unique.first { !taken.contains($0) } ?? name, for: current)
+            }
+        }
+    }
+
     private func run(command: String) {
         let parts = command.split(separator: ":", maxSplits: 1).map(String.init)
         switch parts.first {
         case "toggle": panel.toggle()
         case "goto": if let index = parts.last.flatMap(Int.init) { go(toIndex: index) }
+        case "autoname": autoName()
+        case "debug": overlay.debugDump(to: URL(fileURLWithPath: parts.count > 1 ? parts[1] : NSTemporaryDirectory()))
+        case "color":
+            store.refresh()
+            if let index = parts.last.flatMap(Int.init), store.spaces.indices.contains(index - 1) {
+                store.cycleColor(for: store.spaces[index - 1])
+            }
         case "name":
             store.refresh()
             let fields = (parts.last ?? "").split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
@@ -98,6 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         default: break
         }
+    }
+
+    private static func title(_ text: String, color: Int?) -> NSAttributedString {
+        let font = NSFont.menuBarFont(ofSize: 0)
+        let title = NSMutableAttributedString()
+        if let color {
+            title.append(NSAttributedString(string: "● ", attributes: [.foregroundColor: Palette.colors[color], .font: font]))
+        }
+        title.append(NSAttributedString(string: text, attributes: [.font: font]))
+        return title
     }
 
     private func requestAccessibility() {
@@ -111,7 +162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         store.refresh()
         menu.removeAllItems()
         for space in store.spaces {
-            let item = NSMenuItem(title: "\(space.index)   \(space.name)", action: #selector(pickSpace(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: "", action: #selector(pickSpace(_:)), keyEquivalent: "")
+            item.attributedTitle = Self.title("\(space.index)   \(space.name)", color: space.emoji == nil ? space.color : nil)
             item.target = self
             item.tag = space.index
             item.state = space.id == store.activeID ? .on : .off
@@ -124,6 +176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rename = NSMenuItem(title: "Rename This Space…", action: #selector(renameCurrent), keyEquivalent: "")
         rename.target = self
         menu.addItem(rename)
+        let auto = NSMenuItem(title: "Auto-Name Unnamed Spaces", action: #selector(autoName), keyEquivalent: "")
+        auto.target = self
+        menu.addItem(auto)
         menu.addItem(.separator())
         if !AXIsProcessTrusted() {
             let access = NSMenuItem(title: "Pin Labels Under Spaces (Grant Accessibility)…", action: #selector(grantAccessibility), keyEquivalent: "")
@@ -155,9 +210,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-// `SpaceTags --goto 2`, `--toggle`, `--name 2=Mail` drive the running instance.
+// `SpaceTags --goto 2`, `--toggle`, `--name 2=Mail`, `--color 2`, `--autoname` drive the running instance.
 let arguments = Array(CommandLine.arguments.dropFirst())
-if let flag = arguments.first, ["--goto", "--toggle", "--name"].contains(flag) {
+if let flag = arguments.first, ["--goto", "--toggle", "--name", "--color", "--autoname", "--debug"].contains(flag) {
     let command = String(flag.dropFirst(2)) + (arguments.count > 1 ? ":" + arguments[1] : "")
     DistributedNotificationCenter.default().postNotificationName(commandNotification, object: command, userInfo: nil, deliverImmediately: true)
     exit(0)

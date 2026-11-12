@@ -119,6 +119,8 @@ final class PanelController {
                 pick(spaces[digit - 1])
             } else if chars == "r" || chars == "e", spaces.indices.contains(model.selection) {
                 beginRename(spaces[model.selection])
+            } else if chars == "c", spaces.indices.contains(model.selection) {
+                store.cycleColor(for: spaces[model.selection])
             }
         }
         return true
@@ -143,7 +145,7 @@ struct PanelView: View {
                 }
             }
             Text(model.editingKey == nil
-                 ? "1–9 jump   ←→ select   ⏎ go   R rename   esc close"
+                 ? "1–9 jump   ←→ select   ⏎ go   R rename   C color   esc close"
                  : "⏎ save   esc cancel   (empty = default name)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -165,6 +167,7 @@ private struct SpaceCard: View {
     @FocusState private var focused: Bool
 
     private var editing: Bool { model.editingKey == space.key }
+    private var tint: Color { space.color.map { Color(nsColor: Palette.colors[$0]) } ?? .primary }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -174,7 +177,7 @@ private struct SpaceCard: View {
                     .frame(width: 20, height: 20)
                     .background(RoundedRectangle(cornerRadius: 5).fill(.primary.opacity(0.12)))
                 if space.isCurrent {
-                    Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+                    Circle().fill(.primary).frame(width: 7, height: 7)
                 }
                 Spacer()
                 Button(action: rename) {
@@ -215,9 +218,9 @@ private struct SpaceCard: View {
         .padding(10)
         .frame(width: 150, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(selected ? Color.accentColor.opacity(0.28) : Color.primary.opacity(0.06)))
+            .fill(tint.opacity(space.color == nil ? (selected ? 0.16 : 0.06) : (selected ? 0.55 : 0.3))))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2))
+            .strokeBorder(selected ? Color.primary.opacity(0.85) : .clear, lineWidth: 2))
         .contentShape(Rectangle())
         .onTapGesture { if !editing { pick() } }
     }

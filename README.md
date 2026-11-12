@@ -2,10 +2,13 @@
 
 A macOS menu bar helper that lets you name your Spaces and jump between them from the keyboard.
 
-- **⌘0** opens a switcher showing every space. Press **1–9** to jump, **←/→** and **⏎** to pick, **R** to rename.
+- **⌘0** opens a switcher showing every space. Press **1–9** to jump, **←/→** and **⏎** to pick, **R** to rename, **C** to change a space's colour.
 - **⌃⌥1 … ⌃⌥9** jump straight to space N.
 - In **Mission Control**, name labels float over the Spaces bar. With Accessibility granted they sit directly under each space; without it they appear as one strip near the top.
 - The menu bar item shows the current space's name and lists all spaces.
+- Each named space gets its own colour and a matching emoji in front of its name (unless the name already starts with one), used in the switcher, the Mission Control labels and the menu bar.
+- On first launch (and from the menu: **Auto-Name Unnamed Spaces**) unnamed desktops are named after the apps on them, using Apple's on-device model on macOS 26 and the app names elsewhere.
+- Names and colours are saved, and the app adds itself to Login Items when run from `/Applications`.
 
 ## Install
 
@@ -20,6 +23,8 @@ Download `release/SpaceTags.zip`, unzip it, and open `SpaceTags.app`. The app is
 Needs the Xcode command line tools (`xcode-select --install`).
 
     ./build.sh run
+
+`./build.sh install` builds, copies the app to `/Applications` and launches it.
 
 ## Notes
 
