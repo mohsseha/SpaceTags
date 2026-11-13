@@ -86,8 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try? SMAppService.mainApp.register()
         }
 
-        // Accessibility is optional: it lets Mission Control labels sit exactly under each space.
-        if !UserDefaults.standard.bool(forKey: "askedForAccessibility") {
+        // Accessibility is optional: before macOS 27 it lets Mission Control labels sit exactly
+        // under each space. Since then the overlay finds the spaces without it.
+        if #available(macOS 27, *) {} else if !UserDefaults.standard.bool(forKey: "askedForAccessibility") {
             UserDefaults.standard.set(true, forKey: "askedForAccessibility")
             requestAccessibility()
         }
@@ -108,7 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             for space in targets {
                 let apps = space.appPIDs.prefix(6).compactMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
-                guard let suggestion = await AutoNamer.suggest(apps: apps, titles: titles[space.id] ?? []),
+                let usedColors = Set(store.spaces.compactMap(\.color))
+                guard let suggestion = await AutoNamer.suggest(apps: apps, titles: titles[space.id] ?? [], taken: usedColors),
                       let current = store.spaces.first(where: { $0.key == space.key }), current.customName == nil
                 else { continue }
                 // Two desktops with similar apps would otherwise get the same name.
@@ -182,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         auto.target = self
         menu.addItem(auto)
         menu.addItem(.separator())
-        if !AXIsProcessTrusted() {
+        if #available(macOS 27, *) {} else if !AXIsProcessTrusted() {
             let access = NSMenuItem(title: "Pin Labels Under Spaces (Grant Accessibility)…", action: #selector(grantAccessibility), keyEquivalent: "")
             access.target = self
             menu.addItem(access)

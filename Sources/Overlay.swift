@@ -63,12 +63,14 @@ final class MissionControlOverlay {
     private var timer: Timer?
     private var active = false
     private var barExpanded = false
+    private var ticks = 0
+    private var missing = 0           // updates since the Spaces bar's windows were last found
     private var windows: [String: (window: NSWindow, model: OverlayModel)] = [:]
     private var spaceLists: [AXUIElement] = []
 
     init(store: SpaceStore) { self.store = store }
 
-    func start() { schedule(0.15) }
+    func start() { schedule(0.1) }
 
     func screensChanged() {
         windows.values.forEach { $0.window.orderOut(nil) }
@@ -89,14 +91,20 @@ final class MissionControlOverlay {
             if visible {
                 store.refresh()
                 barExpanded = false
+                missing = 0
                 spaceLists = []
                 schedule(0.05)
             } else {
                 windows.values.forEach { $0.window.orderOut(nil) }
-                schedule(0.15)
+                schedule(0.1)
             }
         }
-        if active { update() }
+        if active {
+            // Spaces can be added, removed and reordered without leaving Mission Control.
+            ticks += 1
+            if ticks % 10 == 0 { store.refresh() }
+            update()
+        }
     }
 
     /// Mission Control shows up as full-screen Dock windows at layers 18–20.
@@ -113,6 +121,31 @@ final class MissionControlOverlay {
         return false
     }
 
+    /// Since macOS 27 Mission Control belongs to WindowManager, which gives every space in the
+    /// Spaces bar a window of its own: a thumbnail with the label beneath. Returns those windows
+    /// left to right in global top-left coordinates, or nil unless there is one per space.
+    private static func spaceBarWindows(in area: CGRect, count: Int) -> [CGRect]? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var rows: [String: [CGRect]] = [:]
+        for info in list {
+            guard info[kCGWindowOwnerName as String] as? String == "WindowManager",
+                  let layer = info[kCGWindowLayer as String] as? Int, (10...18).contains(layer),
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  area.contains(CGPoint(x: rect.midX, y: rect.midY)), rect.midY < area.minY + area.height * 0.3,
+                  rect.width < area.width / 2, (10...40).contains(rect.height - rect.width * area.height / area.width)
+            else { continue }
+            rows["\(layer) \(rect.minY) \(rect.size)", default: []].append(rect)
+        }
+        return rows.values.filter { $0.count == count }.min { $0[0].minY < $1[0].minY }?.sorted { $0.minX < $1.minX }
+    }
+
+    /// The part of a Spaces bar item below its thumbnail, where the space's name is written.
+    private static func labelStrip(of item: CGRect, on screen: NSScreen) -> CGRect {
+        let thumbnail = item.width * screen.frame.height / screen.frame.width
+        return CGRect(x: item.minX, y: item.minY + thumbnail, width: item.width, height: item.height - thumbnail)
+    }
+
     private func update() {
         let frames = AXIsProcessTrusted() ? spaceButtonFrames() : []
         let mouse = NSEvent.mouseLocation
@@ -120,11 +153,28 @@ final class MissionControlOverlay {
             guard let screen = NSScreen.forDisplay(displayID) else { continue }
             let entry = overlay(for: displayID, on: screen)
             let origin = screen.topLeftFrame.origin
+            let items = Self.spaceBarWindows(in: screen.topLeftFrame, count: spaces.count)
             let onScreen = frames.first { list in
                 list.count == spaces.count && list.first.map { screen.topLeftFrame.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true
             }
             var chips = spaces.map { Chip(id: $0.id, number: $0.index, name: $0.name, isCurrent: $0.isCurrent, color: $0.color) }
-            if let onScreen {
+            missing = items == nil ? missing + 1 : 0
+            if let items {
+                // Exact, and needs no permission: each item is a thumbnail shaped like the screen
+                // with the space's label in the strip beneath. The chip fills that strip at least
+                // as wide as the label it replaces, so "Desktop 1" doesn't show around it.
+                let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+                for i in chips.indices {
+                    let frame = items[i].offsetBy(dx: -origin.x, dy: -origin.y)
+                    let label = Self.labelStrip(of: frame, on: screen)
+                    let covered = (spaces[i].defaultName as NSString).size(withAttributes: [.font: font]).width + 18
+                    chips[i].center = CGPoint(x: label.midX, y: label.midY)
+                    chips[i].minWidth = min(frame.width, covered)
+                    chips[i].maxWidth = frame.width
+                }
+                chips = chips.enumerated().filter { spaces[$0.offset].customName != nil }.map(\.element)
+                entry.model.pinned = true
+            } else if let onScreen {
                 // Exact: named spaces get a chip on their own entry in the Spaces bar. While the
                 // bar is a row of text labels the chip covers the label, so it reads as renamed;
                 // once it grows into thumbnails the chip sits on the thumbnail's bottom edge.
@@ -142,6 +192,12 @@ final class MissionControlOverlay {
                 // bar, which grows into thumbnails once the pointer reaches the top.
                 let menuBar = max(screen.safeAreaInsets.top, NSStatusBar.system.thickness)
                 if screen.frame.contains(mouse), screen.frame.maxY - mouse.y < menuBar + 44 { barExpanded = true }
+                if #available(macOS 27, *) {
+                    // The bar is always thumbnails there, and its windows can trail Mission Control
+                    // by a moment; only settle for the strip once they have clearly not turned up.
+                    barExpanded = true
+                    if missing < 20 { chips = [] }
+                }
                 entry.model.pinned = false
                 entry.model.stripY = barExpanded ? menuBar + screen.frame.height * 0.11 + 62 : menuBar + 58
             }
@@ -150,7 +206,7 @@ final class MissionControlOverlay {
                 entry.window.alphaValue = 0
                 entry.window.orderFrontRegardless()
                 NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.25
+                    context.duration = 0.12
                     entry.window.animator().alphaValue = 1
                 }
             }
@@ -192,11 +248,19 @@ final class MissionControlOverlay {
                 }
             }
         }
+        for (displayID, spaces) in Dictionary(grouping: store.spaces, by: \.displayID) {
+            guard let screen = NSScreen.forDisplay(displayID) else { continue }
+            let items = Self.spaceBarWindows(in: screen.topLeftFrame, count: spaces.count)
+            lines.append("barWindows \(displayID) spaces=\(spaces.count) items=\(items.map { "\($0)" } ?? "-")")
+            for item in items ?? [] { lines.append("  labelStrip=\(Self.labelStrip(of: item, on: screen))") }
+        }
         for (id, entry) in windows {
             let window = entry.window
             lines.append("window \(id) frame=\(window.frame) visible=\(window.isVisible) alpha=\(window.alphaValue) "
                 + "occlusionVisible=\(window.occlusionState.contains(.visible)) pinned=\(entry.model.pinned) stripY=\(entry.model.stripY)")
-            for chip in entry.model.chips { lines.append("  chip \(chip.number) \(chip.name) center=\(chip.center)") }
+            for chip in entry.model.chips {
+                lines.append("  chip \(chip.number) \(chip.name) center=\(chip.center) minWidth=\(chip.minWidth ?? 0) maxWidth=\(chip.maxWidth ?? 0)")
+            }
             if let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("overlay-\(id).png"))
