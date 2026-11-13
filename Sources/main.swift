@@ -108,13 +108,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             for space in targets {
                 let apps = space.appPIDs.prefix(6).compactMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
-                guard let name = await AutoNamer.suggest(apps: apps, titles: titles[space.id] ?? []),
+                guard let suggestion = await AutoNamer.suggest(apps: apps, titles: titles[space.id] ?? []),
                       let current = store.spaces.first(where: { $0.key == space.key }), current.customName == nil
                 else { continue }
                 // Two desktops with similar apps would otherwise get the same name.
+                let name = suggestion.name
                 let taken = Set(store.spaces.compactMap(\.customName))
                 let unique = [name] + (2...9).map { "\(name) \($0)" }
-                store.setName(unique.first { !taken.contains($0) } ?? name, for: current)
+                store.setName(unique.first { !taken.contains($0) } ?? name, for: current,
+                              color: suggestion.color, emoji: suggestion.emoji)
             }
         }
     }

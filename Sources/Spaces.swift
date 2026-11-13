@@ -13,7 +13,9 @@ import Cocoa
 enum Palette {
     static let colors: [NSColor] = [.systemRed, .systemOrange, .systemGreen, .systemTeal,
                                     .systemBlue, .systemIndigo, .systemPurple, .systemPink]
-    /// Mascots in each colour; a named space gets one picked by its name.
+    /// What the auto-namer's model calls each colour.
+    static let colorNames = ["red", "orange", "green", "teal", "blue", "indigo", "purple", "pink"]
+    /// Mascots in each colour; a named space gets one picked by its name unless the auto-namer chose one.
     static let emoji: [[String]] = [
         ["🍎", "🍓", "🌶️", "🐞", "🚒", "🌹"], ["🦊", "🍊", "🏀", "🔥", "🥕", "🐯"],
         ["🐸", "🌵", "🍀", "🥑", "🐢", "🌲"], ["🐬", "🧊", "💎", "🌊", "🦕", "🧪"],
@@ -73,6 +75,7 @@ final class SpaceStore: ObservableObject {
     private let defaults = UserDefaults.standard
     private let namesKey = "spaceNames"
     private let colorsKey = "spaceColors"
+    private let emojisKey = "spaceEmojis"
 
     var active: Space? { spaces.first { $0.id == activeID } }
 
@@ -86,7 +89,14 @@ final class SpaceStore: ObservableObject {
         set { defaults.set(newValue, forKey: colorsKey) }
     }
 
-    func setName(_ name: String, for space: Space) {
+    /// Mascots the auto-namer chose; a space without one gets a mascot picked by its name.
+    private var emojis: [String: String] {
+        get { defaults.dictionary(forKey: emojisKey) as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: emojisKey) }
+    }
+
+    /// `color` and `emoji` are the auto-namer's choices; a name typed by hand passes neither.
+    func setName(_ name: String, for space: Space, color: Int? = nil, emoji: String? = nil) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = trimmed.isEmpty || trimmed == space.defaultName ? nil : trimmed
         var all = names
@@ -94,11 +104,20 @@ final class SpaceStore: ObservableObject {
         if let appKey = space.appKey { all[appKey] = value }
         names = all
 
+        var emojis = self.emojis
+        let mascot = value == nil ? nil : emoji
+        emojis[space.key] = mascot
+        if let appKey = space.appKey { emojis[appKey] = mascot }
+        self.emojis = emojis
+
         // A newly named space takes a colour no other space is using; C in the switcher changes it.
         var colors = self.colors
         if value == nil {
             colors[space.key] = nil
             if let appKey = space.appKey { colors[appKey] = nil }
+        } else if let color, Palette.colors.indices.contains(color) {
+            colors[space.key] = color
+            if let appKey = space.appKey { colors[appKey] = color }
         } else if space.customName == nil {
             let used = Set(spaces.compactMap(\.color))
             if let free = Palette.colors.indices.first(where: { !used.contains($0) }) {
@@ -123,6 +142,7 @@ final class SpaceStore: ObservableObject {
     func refresh() {
         let names = self.names
         let colors = self.colors
+        let emojis = self.emojis
         let apps = appsBySpace()
         var result: [Space] = []
         var desktopCount = 0
@@ -165,7 +185,10 @@ final class SpaceStore: ObservableObject {
                     .map { $0 % Palette.colors.count }
                 var emoji: String?
                 if let customName, let color, let first = customName.first, !first.startsWithEmoji {
-                    emoji = Palette.emoji[color][Palette.hash(customName) % Palette.emoji[color].count]
+                    // The auto-namer's mascot holds while the space keeps the colour it came with.
+                    let chosen = emojis[key] ?? (inherited ? appKey.flatMap { emojis[$0] } : nil)
+                    emoji = chosen.flatMap { Palette.emoji[color].contains($0) ? $0 : nil }
+                        ?? Palette.emoji[color][Palette.hash(customName) % Palette.emoji[color].count]
                 }
                 result.append(Space(id: id, key: key, appKey: appKey, displayID: displayID, index: result.count + 1,
                                     isFullscreen: fullscreen, desktopNumber: number, isCurrent: id == current,
