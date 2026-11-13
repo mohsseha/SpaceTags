@@ -146,6 +146,30 @@ final class MissionControlOverlay {
         return CGRect(x: item.minX, y: item.minY + thumbnail, width: item.width, height: item.height - thumbnail)
     }
 
+    /// Opened from a desktop, the Spaces bar starts as a centred row of names with no windows of
+    /// their own; only the bar's window, a short one, says so. The row's layout follows from the
+    /// text: 13pt semibold, 11pt of padding either side, 3pt apart. Returns each name's pill.
+    private static func spaceBarLabels(in area: CGRect, names: [String]) -> [CGRect]? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let bars = list.compactMap { info -> CGRect? in
+            guard info[kCGWindowOwnerName as String] as? String == "WindowManager",
+                  let layer = info[kCGWindowLayer as String] as? Int, (10...18).contains(layer),
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  abs(rect.minX - area.minX) < 1, abs(rect.width - area.width) < 1, rect.minY < area.minY + 60
+            else { return nil }
+            return rect
+        }
+        guard let bar = bars.first, bar.height < 120 else { return nil }
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let widths = names.map { ($0 as NSString).size(withAttributes: [.font: font]).width + 22 }
+        var x = area.midX - (widths.reduce(0, +) + 3 * CGFloat(widths.count - 1)) / 2
+        return widths.map { width in
+            defer { x += width + 3 }
+            return CGRect(x: x, y: bar.minY + 8, width: width, height: 24)
+        }
+    }
+
     private func update() {
         let frames = AXIsProcessTrusted() ? spaceButtonFrames() : []
         let mouse = NSEvent.mouseLocation
@@ -154,11 +178,12 @@ final class MissionControlOverlay {
             let entry = overlay(for: displayID, on: screen)
             let origin = screen.topLeftFrame.origin
             let items = Self.spaceBarWindows(in: screen.topLeftFrame, count: spaces.count)
+            let labels = items == nil ? Self.spaceBarLabels(in: screen.topLeftFrame, names: spaces.map(\.defaultName)) : nil
             let onScreen = frames.first { list in
                 list.count == spaces.count && list.first.map { screen.topLeftFrame.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true
             }
             var chips = spaces.map { Chip(id: $0.id, number: $0.index, name: $0.name, isCurrent: $0.isCurrent, color: $0.color) }
-            missing = items == nil ? missing + 1 : 0
+            missing = items == nil && labels == nil ? missing + 1 : 0
             if let items {
                 // Exact, and needs no permission: each item is a thumbnail shaped like the screen
                 // with the space's label in the strip beneath. The chip fills that strip at least
@@ -171,6 +196,24 @@ final class MissionControlOverlay {
                     chips[i].center = CGPoint(x: label.midX, y: label.midY)
                     chips[i].minWidth = min(frame.width, covered)
                     chips[i].maxWidth = frame.width
+                }
+                chips = chips.enumerated().filter { spaces[$0.offset].customName != nil }.map(\.element)
+                entry.model.pinned = true
+            } else if let labels {
+                // Worked out rather than read, but good to a point or so: the chip takes the place
+                // of the name's pill. A longer name may grow sideways, but only as far as the next
+                // chip, or short of the next label's text; past either end there is room to spare.
+                let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+                func room(_ i: Int) -> CGFloat { !spaces.indices.contains(i) ? 60 : spaces[i].customName != nil ? 1 : 6 }
+                for i in chips.indices {
+                    let pill = labels[i].offsetBy(dx: -origin.x, dy: -origin.y)
+                    let wanted = (chips[i].name as NSString).size(withAttributes: [.font: font]).width + 24
+                    let width = min(max(wanted, pill.width), pill.width + room(i - 1) + room(i + 1))
+                    let extra = width - pill.width
+                    let left = min(room(i - 1), max(extra / 2, extra - room(i + 1)))
+                    chips[i].center = CGPoint(x: pill.minX - left + width / 2, y: pill.midY)
+                    chips[i].minWidth = width
+                    chips[i].maxWidth = width
                 }
                 chips = chips.enumerated().filter { spaces[$0.offset].customName != nil }.map(\.element)
                 entry.model.pinned = true
@@ -193,8 +236,8 @@ final class MissionControlOverlay {
                 let menuBar = max(screen.safeAreaInsets.top, NSStatusBar.system.thickness)
                 if screen.frame.contains(mouse), screen.frame.maxY - mouse.y < menuBar + 44 { barExpanded = true }
                 if #available(macOS 27, *) {
-                    // The bar is always thumbnails there, and its windows can trail Mission Control
-                    // by a moment; only settle for the strip once they have clearly not turned up.
+                    // The bar's windows can trail Mission Control by a moment; only settle for the
+                    // strip, clear of the bar, once they have plainly not turned up.
                     barExpanded = true
                     if missing < 20 { chips = [] }
                 }
@@ -253,6 +296,9 @@ final class MissionControlOverlay {
             let items = Self.spaceBarWindows(in: screen.topLeftFrame, count: spaces.count)
             lines.append("barWindows \(displayID) spaces=\(spaces.count) items=\(items.map { "\($0)" } ?? "-")")
             for item in items ?? [] { lines.append("  labelStrip=\(Self.labelStrip(of: item, on: screen))") }
+            if items == nil, let labels = Self.spaceBarLabels(in: screen.topLeftFrame, names: spaces.map(\.defaultName)) {
+                for label in labels { lines.append("  labelPill=\(label)") }
+            }
         }
         for (id, entry) in windows {
             let window = entry.window

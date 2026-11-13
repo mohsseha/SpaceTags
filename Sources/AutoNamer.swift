@@ -41,12 +41,19 @@ enum AutoNamer {
                 """)
             var prompt = "Apps: " + apps.joined(separator: ", ")
             if !titles.isEmpty { prompt += "\nWindow titles: " + titles.joined(separator: "; ") }
-            guard let reply = try? await session.respond(to: prompt).content, let name = name(in: reply) else { return nil }
+            guard let reply = try? await session.respond(to: prompt).content else { return nil }
             let line = reply.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
             var color = color(in: line.split(separator: ",", maxSplits: 1).dropFirst().first.map(String.init) ?? "", among: offered)
             if color == nil, let again = try? await session.respond(to: "That color is not on the list. Reply with one of these only: \(colors)").content {
                 color = self.color(in: again, among: offered)
             }
+            // Told not to hand back an app's name, it sometimes does anyway.
+            var name = name(in: reply, apps: apps)
+            if name == nil, apps.count > 1,
+               let again = try? await session.respond(to: "That is one of the apps. Name the activity instead, in one or two words. Reply with the name only.").content {
+                name = self.name(in: again, apps: apps)
+            }
+            guard let name = name ?? self.name(in: reply) else { return nil }
             let row = color ?? offered[0]
             // It keeps to the palette far better when the emoji is a question of its own.
             let pick = try? await session.respond(to: """
@@ -59,15 +66,24 @@ enum AutoNamer {
         return nil
     }
 
-    /// The model sometimes adds quotes, punctuation or a sentence; keep the first two words
-    /// of what comes before the comma.
-    static func name(in reply: String) -> String? {
-        let line = reply.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        let words = (line.split(separator: ",").first ?? "").split(separator: " ")
-            .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
-            .filter { !$0.isEmpty }
-        let name = String(words.prefix(2).joined(separator: " ").prefix(24))
-        return name.isEmpty ? nil : name
+    /// The name in a reply of the form "name, color". The model sometimes adds quotes, asterisks
+    /// or a sentence, and sometimes repeats the apps first ("Mail, Safari - Email, blue"); keep
+    /// the first two words of the first part that isn't one of `apps`, nil if there is none.
+    static func name(in reply: String, apps: [String] = []) -> String? {
+        var line = reply.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        if let dash = line.range(of: " - ", options: .backwards) { line = String(line[dash.upperBound...]) }
+        func isApp(_ text: String) -> Bool { apps.contains { $0.caseInsensitiveCompare(text) == .orderedSame } }
+        for part in line.split(separator: ",") {
+            let words = (part.split(separator: ":").last ?? "").split(separator: " ")
+                .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+                .filter { !$0.isEmpty && !isApp($0) }
+            let name = String(words.prefix(2).joined(separator: " ").prefix(24))
+            if name.isEmpty || isApp(part.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)) { continue }
+            // Past the name there is only the colour; a reply that was all apps has no name.
+            if Palette.colorNames.contains(name.lowercased()) { return nil }
+            return name == name.lowercased() ? name.prefix(1).uppercased() + name.dropFirst() : name
+        }
+        return nil
     }
 
     /// The first of the offered colours that the reply names.
